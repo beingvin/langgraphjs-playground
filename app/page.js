@@ -8,7 +8,10 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "Hello! I am your LangGraph.js Agent powered by Vertex AI Gemini with real-time token and event streaming enabled. I have access to tools (`get_weather`, `calculator`, `lookup_time`) and maintain conversation memory across messages in this thread. What would you like to explore?",
+        "Hello! I am your LangGraph.js Agent with Human-in-the-Loop & real-time streaming enabled.\n\n" +
+        "• Safe Tools: `get_weather`, `calculator`, `lookup_time`\n" +
+        "• Guarded Tool: `transfer_funds` (triggers an approval prompt before executing).\n\n" +
+        "What would you like to explore?",
       steps: [],
     },
   ]);
@@ -17,6 +20,7 @@ export default function Home() {
   const [currentStatus, setCurrentStatus] = useState("");
   const [threadId, setThreadId] = useState(`thread-${Date.now().toString(36)}`);
   const [expandedSteps, setExpandedSteps] = useState({});
+  const [pendingApproval, setPendingApproval] = useState(null); // { action, recipient, amount, warning }
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -25,7 +29,99 @@ export default function Home() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, loading, currentStatus]);
+  }, [messages, loading, currentStatus, pendingApproval]);
+
+  const readStream = async (response, agentMessageId) => {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const jsonStr = line.replace("data: ", "").trim();
+        if (!jsonStr) continue;
+
+        try {
+          const event = JSON.parse(jsonStr);
+
+          if (event.type === "node_start") {
+            setCurrentStatus(
+              event.node === "agent" ? "Agent reasoning..." : "Executing tools..."
+            );
+          } else if (event.type === "tool_start") {
+            setCurrentStatus(`Calling tool: ${event.name}...`);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === agentMessageId
+                  ? {
+                      ...m,
+                      steps: [
+                        ...m.steps,
+                        {
+                          type: "tool_call",
+                          name: event.name,
+                          input: event.input,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
+            setExpandedSteps((prev) => ({ ...prev, [agentMessageId]: true }));
+          } else if (event.type === "tool_end") {
+            setCurrentStatus(`Tool ${event.name} returned result`);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === agentMessageId
+                  ? {
+                      ...m,
+                      steps: [
+                        ...m.steps,
+                        {
+                          type: "tool_result",
+                          name: event.name,
+                          output: event.output,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
+          } else if (event.type === "token") {
+            setCurrentStatus("Streaming response...");
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === agentMessageId
+                  ? { ...m, content: m.content + event.content }
+                  : m
+              )
+            );
+          } else if (event.type === "interrupt") {
+            setCurrentStatus("⚠️ Paused: Awaiting human approval...");
+            setPendingApproval({
+              ...event.payload,
+              agentMessageId,
+            });
+          } else if (event.type === "error") {
+            throw new Error(event.error);
+          } else if (event.type === "done") {
+            setCurrentStatus("");
+            setPendingApproval(null);
+          }
+        } catch (parseErr) {
+          console.error("Error parsing SSE event:", parseErr);
+        }
+      }
+    }
+  };
 
   const handleSend = async (customPrompt) => {
     const textToSend = customPrompt || input;
@@ -49,6 +145,7 @@ export default function Home() {
     setMessages((prev) => [...prev, userMsg, initialAgentMsg]);
     if (!customPrompt) setInput("");
     setLoading(true);
+    setPendingApproval(null);
     setCurrentStatus("Initializing LangGraph...");
 
     try {
@@ -66,88 +163,7 @@ export default function Home() {
         throw new Error(errData.error || `HTTP error ${response.status}`);
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const jsonStr = line.replace("data: ", "").trim();
-          if (!jsonStr) continue;
-
-          try {
-            const event = JSON.parse(jsonStr);
-
-            if (event.type === "node_start") {
-              setCurrentStatus(
-                event.node === "agent" ? "Agent reasoning..." : "Executing tools..."
-              );
-            } else if (event.type === "tool_start") {
-              setCurrentStatus(`Calling tool: ${event.name}...`);
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === agentMessageId
-                    ? {
-                        ...m,
-                        steps: [
-                          ...m.steps,
-                          {
-                            type: "tool_call",
-                            name: event.name,
-                            input: event.input,
-                          },
-                        ],
-                      }
-                    : m
-                )
-              );
-              setExpandedSteps((prev) => ({ ...prev, [agentMessageId]: true }));
-            } else if (event.type === "tool_end") {
-              setCurrentStatus(`Tool ${event.name} returned result`);
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === agentMessageId
-                    ? {
-                        ...m,
-                        steps: [
-                          ...m.steps,
-                          {
-                            type: "tool_result",
-                            name: event.name,
-                            output: event.output,
-                          },
-                        ],
-                      }
-                    : m
-                )
-              );
-            } else if (event.type === "token") {
-              setCurrentStatus("Streaming response...");
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === agentMessageId
-                    ? { ...m, content: m.content + event.content }
-                    : m
-                )
-              );
-            } else if (event.type === "error") {
-              throw new Error(event.error);
-            } else if (event.type === "done") {
-              setCurrentStatus("");
-            }
-          } catch (parseErr) {
-            console.error("Error parsing SSE event:", parseErr);
-          }
-        }
-      }
+      await readStream(response, agentMessageId);
     } catch (err) {
       setMessages((prev) =>
         prev.map((m) =>
@@ -168,9 +184,47 @@ export default function Home() {
     }
   };
 
+  // Human Operator clicks [Approve] or [Reject]
+  const handleDecision = async (decision) => {
+    if (!pendingApproval) return;
+    const targetAgentMessageId = pendingApproval.agentMessageId;
+    setPendingApproval(null);
+    setLoading(true);
+    setCurrentStatus(`Human operator ${decision}d action. Resuming graph...`);
+
+    try {
+      const response = await fetch("/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resumeAction: decision,
+          threadId: threadId,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to resume execution: HTTP ${response.status}`);
+      }
+
+      await readStream(response, targetAgentMessageId);
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === targetAgentMessageId
+            ? { ...m, content: `${m.content}\n\n⚠️ Error resuming: ${err.message}` }
+            : m
+        )
+      );
+    } finally {
+      setLoading(false);
+      setCurrentStatus("");
+    }
+  };
+
   const handleNewSession = () => {
     const newId = `thread-${Date.now().toString(36)}`;
     setThreadId(newId);
+    setPendingApproval(null);
     setMessages([
       {
         id: `welcome-${Date.now()}`,
@@ -186,10 +240,10 @@ export default function Home() {
   };
 
   const quickPrompts = [
+    "Please transfer $2,500 to Alice for project milestone.",
     "What is the weather in Tokyo and calculate 84 divided by 7?",
     "What time is it in Asia/Tokyo right now?",
     "My name is Priya. Please remember my favorite city is Paris.",
-    "What is my name and what is the weather in my favorite city?",
   ];
 
   return (
@@ -201,7 +255,7 @@ export default function Home() {
           <div>
             <h1 style={styles.title}>LangGraph.js Playground</h1>
             <p style={styles.subtitle}>
-              Live Streaming &bull; ReAct Agent &bull; Vertex AI Gemini &bull; Tool Calling &bull; Checkpoint Memory
+              Human-in-the-Loop &bull; Live Streaming &bull; ReAct Agent &bull; Checkpoint Memory
             </p>
           </div>
         </div>
@@ -296,7 +350,7 @@ export default function Home() {
 
                   <div style={styles.messageContent}>
                     {m.content}
-                    {loading && m.role === "assistant" && !m.content && (
+                    {loading && m.role === "assistant" && !m.content && !pendingApproval && (
                       <span style={{ color: "#94a3b8", fontStyle: "italic" }}>
                         Waiting for response...
                       </span>
@@ -306,6 +360,42 @@ export default function Home() {
               </div>
             );
           })}
+
+          {/* Human-in-the-Loop Approval Banner */}
+          {pendingApproval && (
+            <div style={styles.approvalWrapper}>
+              <div style={styles.approvalCard}>
+                <div style={styles.approvalHeader}>
+                  <span style={styles.warningIcon}>⚠️</span>
+                  <div>
+                    <h3 style={styles.approvalTitle}>Human Authorization Required</h3>
+                    <p style={styles.approvalDesc}>{pendingApproval.warning}</p>
+                  </div>
+                </div>
+                <div style={styles.approvalMeta}>
+                  <div><strong>Action:</strong> <code>{pendingApproval.action}</code></div>
+                  <div><strong>Recipient:</strong> <span style={{ color: "#60a5fa" }}>{pendingApproval.recipient}</span></div>
+                  <div><strong>Amount:</strong> <span style={{ color: "#34d399", fontWeight: "bold" }}>${pendingApproval.amount?.toLocaleString()} USD</span></div>
+                </div>
+                <div style={styles.approvalActions}>
+                  <button
+                    onClick={() => handleDecision("approve")}
+                    disabled={loading}
+                    style={styles.approveBtn}
+                  >
+                    ✓ Approve Transfer
+                  </button>
+                  <button
+                    onClick={() => handleDecision("reject")}
+                    disabled={loading}
+                    style={styles.rejectBtn}
+                  >
+                    ✕ Reject Transfer
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {loading && currentStatus && (
             <div style={{ ...styles.messageRow, justifyContent: "flex-start" }}>
@@ -346,7 +436,7 @@ export default function Home() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask agent anything (supports streaming tools, math, timezone, memory)..."
+            placeholder="Ask agent anything or trigger transfer to test human approval..."
             style={styles.inputField}
             disabled={loading}
           />
@@ -358,7 +448,7 @@ export default function Home() {
               opacity: loading || !input.trim() ? 0.5 : 1,
             }}
           >
-            {loading ? "Streaming..." : "Send"}
+            {loading ? "Running..." : "Send"}
           </button>
         </form>
       </div>
@@ -556,6 +646,80 @@ const styles = {
     fontSize: "11px",
     border: "1px solid #164e63",
     overflowX: "auto",
+  },
+  approvalWrapper: {
+    display: "flex",
+    justifyContent: "center",
+    margin: "8px 0",
+    width: "100%",
+  },
+  approvalCard: {
+    backgroundColor: "#181e2e",
+    border: "1px solid #f59e0b",
+    boxShadow: "0 0 20px rgba(245, 158, 11, 0.2)",
+    borderRadius: "12px",
+    padding: "18px 22px",
+    maxWidth: "520px",
+    width: "100%",
+    animation: "fadeIn 0.2s ease-in-out",
+  },
+  approvalHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    marginBottom: "12px",
+  },
+  warningIcon: {
+    fontSize: "24px",
+  },
+  approvalTitle: {
+    fontSize: "15px",
+    fontWeight: "700",
+    color: "#f59e0b",
+  },
+  approvalDesc: {
+    fontSize: "12px",
+    color: "var(--text-secondary)",
+    marginTop: "2px",
+  },
+  approvalMeta: {
+    backgroundColor: "#0f1523",
+    border: "1px solid var(--border)",
+    borderRadius: "8px",
+    padding: "10px 14px",
+    fontSize: "13px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "6px",
+    marginBottom: "16px",
+  },
+  approvalActions: {
+    display: "flex",
+    gap: "12px",
+  },
+  approveBtn: {
+    flex: 1,
+    backgroundColor: "#059669",
+    border: "none",
+    color: "#fff",
+    padding: "10px 16px",
+    borderRadius: "8px",
+    fontWeight: "600",
+    fontSize: "13px",
+    cursor: "pointer",
+    transition: "background-color 0.15s ease",
+  },
+  rejectBtn: {
+    flex: 1,
+    backgroundColor: "#dc2626",
+    border: "none",
+    color: "#fff",
+    padding: "10px 16px",
+    borderRadius: "8px",
+    fontWeight: "600",
+    fontSize: "13px",
+    cursor: "pointer",
+    transition: "background-color 0.15s ease",
   },
   statusBubble: {
     display: "inline-flex",

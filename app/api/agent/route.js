@@ -1,16 +1,11 @@
 import { agentApp } from "@/lib/agent";
 import { HumanMessage } from "@langchain/core/messages";
+import { Command } from "@langchain/langgraph";
 
 export async function POST(request) {
   try {
-    const { message, threadId } = await request.json();
-
-    if (!message || typeof message !== "string") {
-      return new Response(JSON.stringify({ error: "Message is required." }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    const body = await request.json();
+    const { message, resumeAction, threadId } = body;
 
     const currentThreadId = threadId || `session-${Date.now()}`;
     const config = {
@@ -27,19 +22,26 @@ export async function POST(request) {
         };
 
         try {
-          // Send initial metadata
           sendEvent({ type: "start", threadId: currentThreadId });
 
+          // Determine input: either resuming an interrupt or starting a new message
+          let graphInput;
+          if (resumeAction) {
+            // Human provided approval or rejection
+            graphInput = new Command({ resume: resumeAction });
+          } else if (message) {
+            graphInput = { messages: [new HumanMessage(message)] };
+          } else {
+            sendEvent({ type: "error", error: "Either 'message' or 'resumeAction' is required." });
+            controller.close();
+            return;
+          }
+
           // Stream graph lifecycle events using streamEvents v2
-          const eventStream = agentApp.streamEvents(
-            {
-              messages: [new HumanMessage(message)],
-            },
-            {
-              ...config,
-              version: "v2",
-            }
-          );
+          const eventStream = agentApp.streamEvents(graphInput, {
+            ...config,
+            version: "v2",
+          });
 
           for await (const event of eventStream) {
             const eventType = event.event;
@@ -84,7 +86,19 @@ export async function POST(request) {
             }
           }
 
-          sendEvent({ type: "done" });
+          // Check if graph stopped because of an interrupt
+          const snapshot = await agentApp.getState(config);
+          if (snapshot.tasks?.length > 0 && snapshot.tasks[0]?.interrupts?.length > 0) {
+            const interruptVal = snapshot.tasks[0].interrupts[0].value;
+            sendEvent({
+              type: "interrupt",
+              payload: interruptVal,
+              threadId: currentThreadId,
+            });
+          } else {
+            sendEvent({ type: "done" });
+          }
+
           controller.close();
         } catch (streamError) {
           console.error("Stream execution error:", streamError);
