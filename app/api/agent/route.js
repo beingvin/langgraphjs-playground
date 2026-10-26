@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { agentApp } from "@/lib/agent";
 import { HumanMessage } from "@langchain/core/messages";
 
@@ -7,7 +6,10 @@ export async function POST(request) {
     const { message, threadId } = await request.json();
 
     if (!message || typeof message !== "string") {
-      return NextResponse.json({ error: "Message is required." }, { status: 400 });
+      return new Response(JSON.stringify({ error: "Message is required." }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     const currentThreadId = threadId || `session-${Date.now()}`;
@@ -15,50 +17,95 @@ export async function POST(request) {
       configurable: { thread_id: currentThreadId },
     };
 
-    // Invoke the state graph with thread memory
-    const result = await agentApp.invoke(
-      {
-        messages: [new HumanMessage(message)],
+    const encoder = new TextEncoder();
+
+    // Create a ReadableStream for Server-Sent Events (SSE)
+    const stream = new ReadableStream({
+      async start(controller) {
+        const sendEvent = (data) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        };
+
+        try {
+          // Send initial metadata
+          sendEvent({ type: "start", threadId: currentThreadId });
+
+          // Stream graph lifecycle events using streamEvents v2
+          const eventStream = agentApp.streamEvents(
+            {
+              messages: [new HumanMessage(message)],
+            },
+            {
+              ...config,
+              version: "v2",
+            }
+          );
+
+          for await (const event of eventStream) {
+            const eventType = event.event;
+
+            // 1. Node start lifecycle
+            if (eventType === "on_chain_start") {
+              if (event.name === "agent" || event.name === "tools") {
+                sendEvent({
+                  type: "node_start",
+                  node: event.name,
+                });
+              }
+            }
+
+            // 2. Token streaming from LLM
+            if (eventType === "on_chat_model_stream") {
+              const chunk = event.data?.chunk;
+              if (chunk?.content) {
+                sendEvent({
+                  type: "token",
+                  content: chunk.content,
+                });
+              }
+            }
+
+            // 3. Tool execution started
+            if (eventType === "on_tool_start") {
+              sendEvent({
+                type: "tool_start",
+                name: event.name,
+                input: event.data?.input,
+              });
+            }
+
+            // 4. Tool execution finished
+            if (eventType === "on_tool_end") {
+              sendEvent({
+                type: "tool_end",
+                name: event.name,
+                output: event.data?.output?.content || event.data?.output,
+              });
+            }
+          }
+
+          sendEvent({ type: "done" });
+          controller.close();
+        } catch (streamError) {
+          console.error("Stream execution error:", streamError);
+          sendEvent({ type: "error", error: streamError.message });
+          controller.close();
+        }
       },
-      config
-    );
+    });
 
-    // Extract execution trace and final output
-    const steps = [];
-    let finalAnswer = "";
-
-    for (const msg of result.messages) {
-      const type = msg.getType();
-      if (type === "ai" && msg.tool_calls?.length > 0) {
-        steps.push({
-          type: "tool_call",
-          tools: msg.tool_calls.map((tc) => ({
-            name: tc.name,
-            args: tc.args,
-          })),
-        });
-      } else if (type === "tool") {
-        steps.push({
-          type: "tool_result",
-          toolName: msg.name,
-          output: msg.content,
-        });
-      } else if (type === "ai" && (!msg.tool_calls || msg.tool_calls.length === 0)) {
-        finalAnswer = msg.content;
-      }
-    }
-
-    return NextResponse.json({
-      answer: finalAnswer,
-      steps: steps,
-      threadId: currentThreadId,
-      totalMessagesInThread: result.messages.length,
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
     });
   } catch (error) {
     console.error("API /api/agent error:", error);
-    return NextResponse.json(
-      { error: error.message || "Failed to execute agent." },
-      { status: 500 }
-    );
+    return new Response(JSON.stringify({ error: error.message || "Failed to start stream." }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }

@@ -8,12 +8,13 @@ export default function Home() {
       id: "welcome",
       role: "assistant",
       content:
-        "Hello! I am your LangGraph.js Agent powered by Vertex AI Gemini. I have access to tools (`get_weather`, `calculator`, `lookup_time`) and maintain conversation memory across messages in this thread. What would you like to explore?",
+        "Hello! I am your LangGraph.js Agent powered by Vertex AI Gemini with real-time token and event streaming enabled. I have access to tools (`get_weather`, `calculator`, `lookup_time`) and maintain conversation memory across messages in this thread. What would you like to explore?",
       steps: [],
     },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [currentStatus, setCurrentStatus] = useState("");
   const [threadId, setThreadId] = useState(`thread-${Date.now().toString(36)}`);
   const [expandedSteps, setExpandedSteps] = useState({});
   const messagesEndRef = useRef(null);
@@ -24,7 +25,7 @@ export default function Home() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, loading]);
+  }, [messages, loading, currentStatus]);
 
   const handleSend = async (customPrompt) => {
     const textToSend = customPrompt || input;
@@ -37,12 +38,21 @@ export default function Home() {
       content: textToSend,
     };
 
-    setMessages((prev) => [...prev, userMsg]);
+    const agentMessageId = `agent-${Date.now()}`;
+    const initialAgentMsg = {
+      id: agentMessageId,
+      role: "assistant",
+      content: "",
+      steps: [],
+    };
+
+    setMessages((prev) => [...prev, userMsg, initialAgentMsg]);
     if (!customPrompt) setInput("");
     setLoading(true);
+    setCurrentStatus("Initializing LangGraph...");
 
     try {
-      const res = await fetch("/api/agent", {
+      const response = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -51,38 +61,110 @@ export default function Home() {
         }),
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Agent execution failed");
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP error ${response.status}`);
       }
 
-      const agentMessageId = `agent-${Date.now()}`;
-      const agentMsg = {
-        id: agentMessageId,
-        role: "assistant",
-        content: data.answer || "Workflow finished with no final message.",
-        steps: data.steps || [],
-        threadId: data.threadId,
-      };
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-      setMessages((prev) => [...prev, agentMsg]);
-      // Auto-expand step badge if tools were executed
-      if (data.steps?.length > 0) {
-        setExpandedSteps((prev) => ({ ...prev, [agentMessageId]: true }));
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.replace("data: ", "").trim();
+          if (!jsonStr) continue;
+
+          try {
+            const event = JSON.parse(jsonStr);
+
+            if (event.type === "node_start") {
+              setCurrentStatus(
+                event.node === "agent" ? "Agent reasoning..." : "Executing tools..."
+              );
+            } else if (event.type === "tool_start") {
+              setCurrentStatus(`Calling tool: ${event.name}...`);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === agentMessageId
+                    ? {
+                        ...m,
+                        steps: [
+                          ...m.steps,
+                          {
+                            type: "tool_call",
+                            name: event.name,
+                            input: event.input,
+                          },
+                        ],
+                      }
+                    : m
+                )
+              );
+              setExpandedSteps((prev) => ({ ...prev, [agentMessageId]: true }));
+            } else if (event.type === "tool_end") {
+              setCurrentStatus(`Tool ${event.name} returned result`);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === agentMessageId
+                    ? {
+                        ...m,
+                        steps: [
+                          ...m.steps,
+                          {
+                            type: "tool_result",
+                            name: event.name,
+                            output: event.output,
+                          },
+                        ],
+                      }
+                    : m
+                )
+              );
+            } else if (event.type === "token") {
+              setCurrentStatus("Streaming response...");
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === agentMessageId
+                    ? { ...m, content: m.content + event.content }
+                    : m
+                )
+              );
+            } else if (event.type === "error") {
+              throw new Error(event.error);
+            } else if (event.type === "done") {
+              setCurrentStatus("");
+            }
+          } catch (parseErr) {
+            console.error("Error parsing SSE event:", parseErr);
+          }
+        }
       }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err-${Date.now()}`,
-          role: "assistant",
-          content: `⚠️ Error: ${err.message}`,
-          isError: true,
-        },
-      ]);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === agentMessageId
+            ? {
+                ...m,
+                content: m.content
+                  ? `${m.content}\n\n⚠️ Error: ${err.message}`
+                  : `⚠️ Error: ${err.message}`,
+                isError: true,
+              }
+            : m
+        )
+      );
     } finally {
       setLoading(false);
+      setCurrentStatus("");
     }
   };
 
@@ -119,7 +201,7 @@ export default function Home() {
           <div>
             <h1 style={styles.title}>LangGraph.js Playground</h1>
             <p style={styles.subtitle}>
-              StateGraph &bull; ReAct Agent &bull; Vertex AI Gemini &bull; Tool Calling &bull; Checkpoint Memory
+              Live Streaming &bull; ReAct Agent &bull; Vertex AI Gemini &bull; Tool Calling &bull; Checkpoint Memory
             </p>
           </div>
         </div>
@@ -181,14 +263,11 @@ export default function Home() {
                               {step.type === "tool_call" && (
                                 <div>
                                   <span style={styles.stepTypeTag}>Call</span>
-                                  {step.tools.map((t, tIdx) => (
-                                    <div key={tIdx} style={styles.stepCode}>
-                                      <code>
-                                        {t.name}(
-                                        {JSON.stringify(t.args, null, 1)})
-                                      </code>
-                                    </div>
-                                  ))}
+                                  <div style={styles.stepCode}>
+                                    <code>
+                                      {step.name}({JSON.stringify(step.input)})
+                                    </code>
+                                  </div>
                                 </div>
                               )}
                               {step.type === "tool_result" && (
@@ -201,10 +280,10 @@ export default function Home() {
                                       borderColor: "rgba(16, 185, 129, 0.4)",
                                     }}
                                   >
-                                    Result: {step.toolName}
+                                    Result: {step.name}
                                   </span>
                                   <div style={styles.stepResultCode}>
-                                    <code>{step.output}</code>
+                                    <code>{JSON.stringify(step.output)}</code>
                                   </div>
                                 </div>
                               )}
@@ -215,25 +294,24 @@ export default function Home() {
                     </div>
                   )}
 
-                  <div style={styles.messageContent}>{m.content}</div>
+                  <div style={styles.messageContent}>
+                    {m.content}
+                    {loading && m.role === "assistant" && !m.content && (
+                      <span style={{ color: "#94a3b8", fontStyle: "italic" }}>
+                        Waiting for response...
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             );
           })}
 
-          {loading && (
+          {loading && currentStatus && (
             <div style={{ ...styles.messageRow, justifyContent: "flex-start" }}>
-              <div
-                style={{
-                  ...styles.messageBubble,
-                  backgroundColor: "#111726",
-                  borderColor: "#3b82f6",
-                }}
-              >
-                <div style={styles.roleTag}>LangGraph Agent</div>
-                <div style={styles.loadingPulse}>
-                  <span style={styles.spinnerDot} /> Graph executing nodes & tools...
-                </div>
+              <div style={styles.statusBubble}>
+                <span style={styles.spinnerDot} />
+                <span>{currentStatus}</span>
               </div>
             </div>
           )}
@@ -268,7 +346,7 @@ export default function Home() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask agent anything or test tools (e.g., weather, calculations, memory)..."
+            placeholder="Ask agent anything (supports streaming tools, math, timezone, memory)..."
             style={styles.inputField}
             disabled={loading}
           />
@@ -280,7 +358,7 @@ export default function Home() {
               opacity: loading || !input.trim() ? 0.5 : 1,
             }}
           >
-            {loading ? "Running..." : "Send"}
+            {loading ? "Streaming..." : "Send"}
           </button>
         </form>
       </div>
@@ -479,19 +557,22 @@ const styles = {
     border: "1px solid #164e63",
     overflowX: "auto",
   },
-  loadingPulse: {
-    display: "flex",
+  statusBubble: {
+    display: "inline-flex",
     alignItems: "center",
     gap: "8px",
+    backgroundColor: "rgba(30, 58, 138, 0.4)",
+    border: "1px solid rgba(59, 130, 246, 0.4)",
     color: "#93c5fd",
-    fontSize: "13px",
+    fontSize: "12px",
+    padding: "6px 12px",
+    borderRadius: "999px",
   },
   spinnerDot: {
-    width: "8px",
-    height: "8px",
+    width: "7px",
+    height: "7px",
     borderRadius: "50%",
-    backgroundColor: "#3b82f6",
-    animation: "pulse 1s infinite alternate",
+    backgroundColor: "#60a5fa",
   },
   quickPromptsBar: {
     display: "flex",
