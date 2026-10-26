@@ -240,10 +240,10 @@ export default function Home() {
   };
 
   const quickPrompts = [
+    "What is my current account balance on ACC-99?",
     "Please transfer $2,500 to Alice for project milestone.",
     "What is the weather in Tokyo and calculate 84 divided by 7?",
     "What time is it in Asia/Tokyo right now?",
-    "My name is Priya. Please remember my favorite city is Paris.",
   ];
 
   return (
