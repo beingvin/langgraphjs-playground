@@ -12,7 +12,8 @@
     "test:tools": "node scripts/test-tools.mjs",
     "test:react": "node scripts/test-tools.mjs",
     "test:memory": "node scripts/test-memory.mjs",
-    "test:stream": "node scripts/test-stream.mjs"
+    "test:stream": "node scripts/test-stream.mjs",
+    "test:hitl": "node scripts/test-human-in-the-loop.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.3.0",
