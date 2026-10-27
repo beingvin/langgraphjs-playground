@@ -14,8 +14,8 @@ export async function POST(request) {
       recursionLimit: 20,
     };
 
-    // Select workflow engine: "multi" (Supervisor Multi-Agent) or default single ReAct agent
-    const activeApp = mode === "multi" ? multiAgentApp : await getAgentApp();
+    const isMultiMode = mode === "multi";
+    const activeApp = isMultiMode ? multiAgentApp : await getAgentApp();
 
     const encoder = new TextEncoder();
 
@@ -39,6 +39,8 @@ export async function POST(request) {
             return;
           }
 
+          let activeNode = "";
+
           const eventStream = activeApp.streamEvents(graphInput, {
             ...config,
             version: "v2",
@@ -51,6 +53,7 @@ export async function POST(request) {
             if (eventType === "on_chain_start") {
               const nodeNames = ["agent", "tools", "supervisor", "ResearchAgent", "FinanceAgent", "synthesizer"];
               if (nodeNames.includes(event.name)) {
+                activeNode = event.name;
                 sendEvent({
                   type: "node_start",
                   node: event.name,
@@ -58,15 +61,19 @@ export async function POST(request) {
               }
             }
 
-            // 2. Token streaming from LLM
+            // 2. Token streaming
             if (eventType === "on_chat_model_stream") {
               const chunk = event.data?.chunk;
               if (chunk?.content) {
-                sendEvent({
-                  type: "token",
-                  content: chunk.content,
-                  sourceNode: event.name,
-                });
+                // In multi-agent mode, ONLY stream tokens from the synthesizer (final answer)
+                // This keeps intermediate supervisor JSON routing out of the chat bubble!
+                if (!isMultiMode || activeNode === "synthesizer") {
+                  sendEvent({
+                    type: "token",
+                    content: chunk.content,
+                    sourceNode: activeNode,
+                  });
+                }
               }
             }
 
@@ -76,6 +83,7 @@ export async function POST(request) {
                 type: "tool_start",
                 name: event.name,
                 input: event.data?.input,
+                node: activeNode,
               });
             }
 
@@ -85,12 +93,13 @@ export async function POST(request) {
                 type: "tool_end",
                 name: event.name,
                 output: event.data?.output?.content || event.data?.output,
+                node: activeNode,
               });
             }
           }
 
-          // Check if single-agent workflow paused due to interrupt()
-          if (mode !== "multi") {
+          // Single agent HITL interrupt check
+          if (!isMultiMode) {
             const snapshot = await activeApp.getState(config);
             if (snapshot.tasks?.length > 0 && snapshot.tasks[0]?.interrupts?.length > 0) {
               const interruptVal = snapshot.tasks[0].interrupts[0].value;
