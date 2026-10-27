@@ -13,13 +13,16 @@
     "test:react": "node scripts/test-tools.mjs",
     "test:memory": "node scripts/test-memory.mjs",
     "test:stream": "node scripts/test-stream.mjs",
-    "test:hitl": "node scripts/test-human-in-the-loop.mjs"
+    "test:hitl": "node scripts/test-human-in-the-loop.mjs",
+    "test:mcp": "node scripts/test-mcp.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.3.0",
     "@langchain/google-genai": "^2.3.4",
     "@langchain/google-vertexai": "^2.3.4",
     "@langchain/langgraph": "^1.5.2",
+    "@langchain/mcp-adapters": "^2.0.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "dotenv": "^18.0.9",
     "next": "16.4.3",
     "react": "19.3.0",
