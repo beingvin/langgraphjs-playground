@@ -1,4 +1,4 @@
-import { agentApp } from "@/lib/agent";
+import { getAgentApp } from "@/lib/agent";
 import { HumanMessage } from "@langchain/core/messages";
 import { Command } from "@langchain/langgraph";
 
@@ -12,6 +12,7 @@ export async function POST(request) {
       configurable: { thread_id: currentThreadId },
     };
 
+    const agentApp = await getAgentApp();
     const encoder = new TextEncoder();
 
     // Create a ReadableStream for Server-Sent Events (SSE)

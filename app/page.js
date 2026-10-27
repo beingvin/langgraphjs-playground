@@ -240,10 +240,10 @@ export default function Home() {
   };
 
   const quickPrompts = [
+    "What is the price of Solana (SOL) and Bitcoin (BTC)?",
+    "How much is 1200 USD in INR, and what is the weather in Tokyo?",
     "What is my current account balance on ACC-99?",
     "Please transfer $2,500 to Alice for project milestone.",
-    "What is the weather in Tokyo and calculate 84 divided by 7?",
-    "What time is it in Asia/Tokyo right now?",
   ];
 
   return (
