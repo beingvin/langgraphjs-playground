@@ -3,15 +3,16 @@
 import { useState, useRef, useEffect } from "react";
 
 export default function Home() {
+  const [mode, setMode] = useState("multi"); // "single" | "multi"
   const [messages, setMessages] = useState([
     {
       id: "welcome",
       role: "assistant",
       content:
-        "Hello! I am your LangGraph.js Agent with Human-in-the-Loop & real-time streaming enabled.\n\n" +
-        "• Safe Tools: `get_weather`, `calculator`, `lookup_time`\n" +
-        "• Guarded Tool: `transfer_funds` (triggers an approval prompt before executing).\n\n" +
-        "What would you like to explore?",
+        "Welcome to the LangGraph.js Multi-Agent & MCP Playground!\n\n" +
+        "• Current Mode: 👥 Multi-Agent Team (Supervisor + Research Agent + Finance Agent)\n" +
+        "• Or switch to: ⚡ Single ReAct Agent (with MCP & Human-in-the-Loop)\n\n" +
+        "Try asking a combined question (e.g., weather + currency) to watch the supervisor dispatch tasks between specialists!",
       steps: [],
     },
   ]);
@@ -20,7 +21,7 @@ export default function Home() {
   const [currentStatus, setCurrentStatus] = useState("");
   const [threadId, setThreadId] = useState(`thread-${Date.now().toString(36)}`);
   const [expandedSteps, setExpandedSteps] = useState({});
-  const [pendingApproval, setPendingApproval] = useState(null); // { action, recipient, amount, warning }
+  const [pendingApproval, setPendingApproval] = useState(null);
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -53,9 +54,15 @@ export default function Home() {
           const event = JSON.parse(jsonStr);
 
           if (event.type === "node_start") {
-            setCurrentStatus(
-              event.node === "agent" ? "Agent reasoning..." : "Executing tools..."
-            );
+            const labels = {
+              supervisor: "👑 Supervisor analyzing task...",
+              ResearchAgent: "🔍 Research Agent executing tools...",
+              FinanceAgent: "💰 Finance Agent executing tools...",
+              synthesizer: "📝 Synthesizer compiling response...",
+              agent: "⚡ ReAct Agent reasoning...",
+              tools: "⚙️ Executing tools...",
+            };
+            setCurrentStatus(labels[event.node] || `Node: ${event.node}...`);
           } else if (event.type === "tool_start") {
             setCurrentStatus(`Calling tool: ${event.name}...`);
             setMessages((prev) =>
@@ -77,7 +84,7 @@ export default function Home() {
             );
             setExpandedSteps((prev) => ({ ...prev, [agentMessageId]: true }));
           } else if (event.type === "tool_end") {
-            setCurrentStatus(`Tool ${event.name} returned result`);
+            setCurrentStatus(`Tool ${event.name} completed`);
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === agentMessageId
@@ -140,13 +147,14 @@ export default function Home() {
       role: "assistant",
       content: "",
       steps: [],
+      workflowMode: mode,
     };
 
     setMessages((prev) => [...prev, userMsg, initialAgentMsg]);
     if (!customPrompt) setInput("");
     setLoading(true);
     setPendingApproval(null);
-    setCurrentStatus("Initializing LangGraph...");
+    setCurrentStatus(mode === "multi" ? "👑 Supervisor analyzing task..." : "Initializing LangGraph...");
 
     try {
       const response = await fetch("/api/agent", {
@@ -155,6 +163,7 @@ export default function Home() {
         body: JSON.stringify({
           message: textToSend,
           threadId: threadId,
+          mode: mode,
         }),
       });
 
@@ -184,7 +193,6 @@ export default function Home() {
     }
   };
 
-  // Human Operator clicks [Approve] or [Reject]
   const handleDecision = async (decision) => {
     if (!pendingApproval) return;
     const targetAgentMessageId = pendingApproval.agentMessageId;
@@ -199,6 +207,7 @@ export default function Home() {
         body: JSON.stringify({
           resumeAction: decision,
           threadId: threadId,
+          mode: mode,
         }),
       });
 
@@ -229,7 +238,7 @@ export default function Home() {
       {
         id: `welcome-${Date.now()}`,
         role: "assistant",
-        content: `New thread initialized (${newId}). Memory is reset for this session!`,
+        content: `New thread initialized (${newId}). Mode: ${mode === "multi" ? "👥 Multi-Agent Team" : "⚡ Single ReAct Agent"}.`,
         steps: [],
       },
     ]);
@@ -239,12 +248,20 @@ export default function Home() {
     setExpandedSteps((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const quickPrompts = [
+  const quickPromptsMulti = [
+    "What is the weather in Tokyo, and how much is 500 USD in INR?",
+    "What time is it in Asia/Tokyo, and what is the current price of Ethereum (ETH)?",
+    "What is the weather in London, and how much is 1000 EUR in USD?",
+  ];
+
+  const quickPromptsSingle = [
     "What is the price of Solana (SOL) and Bitcoin (BTC)?",
-    "How much is 1200 USD in INR, and what is the weather in Tokyo?",
     "What is my current account balance on ACC-99?",
     "Please transfer $2,500 to Alice for project milestone.",
+    "What is 25 times 4 and what time is it in Asia/Tokyo?",
   ];
+
+  const activePrompts = mode === "multi" ? quickPromptsMulti : quickPromptsSingle;
 
   return (
     <div style={styles.container}>
@@ -255,17 +272,42 @@ export default function Home() {
           <div>
             <h1 style={styles.title}>LangGraph.js Playground</h1>
             <p style={styles.subtitle}>
-              Human-in-the-Loop &bull; Live Streaming &bull; ReAct Agent &bull; Checkpoint Memory
+              Multi-Agent Collaboration &bull; MCP &bull; Human-in-the-Loop &bull; Live SSE Streaming
             </p>
           </div>
         </div>
+
+        {/* Mode Selector & Session */}
         <div style={styles.headerRight}>
+          <div style={styles.modeSwitchWrapper}>
+            <button
+              onClick={() => setMode("multi")}
+              style={{
+                ...styles.modeBtn,
+                backgroundColor: mode === "multi" ? "#2563eb" : "transparent",
+                color: mode === "multi" ? "#fff" : "var(--text-secondary)",
+              }}
+            >
+              👥 Multi-Agent
+            </button>
+            <button
+              onClick={() => setMode("single")}
+              style={{
+                ...styles.modeBtn,
+                backgroundColor: mode === "single" ? "#2563eb" : "transparent",
+                color: mode === "single" ? "#fff" : "var(--text-secondary)",
+              }}
+            >
+              ⚡ Single ReAct
+            </button>
+          </div>
+
           <div style={styles.threadBadge}>
             <span style={styles.threadDot} />
-            Thread: <code>{threadId}</code>
+            <code>{threadId}</code>
           </div>
           <button onClick={handleNewSession} style={styles.newSessionBtn}>
-            + New Thread
+            + Reset
           </button>
         </div>
       </header>
@@ -291,7 +333,11 @@ export default function Home() {
                   }}
                 >
                   <div style={styles.roleTag}>
-                    {isUser ? "You" : "LangGraph Agent"}
+                    {isUser
+                      ? "You"
+                      : m.workflowMode === "multi"
+                      ? "👥 Multi-Agent Team"
+                      : "⚡ LangGraph Agent"}
                   </div>
 
                   {/* Observability: Steps Accordion */}
@@ -411,8 +457,8 @@ export default function Home() {
 
         {/* Quick Suggestion Prompts */}
         <div style={styles.quickPromptsBar}>
-          <span style={styles.quickLabel}>Try:</span>
-          {quickPrompts.map((p, idx) => (
+          <span style={styles.quickLabel}>Try ({mode}):</span>
+          {activePrompts.map((p, idx) => (
             <button
               key={idx}
               onClick={() => handleSend(p)}
@@ -436,7 +482,11 @@ export default function Home() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask agent anything or trigger transfer to test human approval..."
+            placeholder={
+              mode === "multi"
+                ? "Ask the Multi-Agent team (e.g. weather + currency conversion)..."
+                : "Ask the ReAct agent (tools, MCP, banking)..."
+            }
             style={styles.inputField}
             disabled={loading}
           />
@@ -507,22 +557,38 @@ const styles = {
   headerRight: {
     display: "flex",
     alignItems: "center",
-    gap: "12px",
+    gap: "10px",
+  },
+  modeSwitchWrapper: {
+    display: "flex",
+    backgroundColor: "var(--bg-tertiary)",
+    border: "1px solid var(--border)",
+    borderRadius: "8px",
+    padding: "2px",
+  },
+  modeBtn: {
+    border: "none",
+    padding: "6px 12px",
+    borderRadius: "6px",
+    fontSize: "12px",
+    fontWeight: "600",
+    cursor: "pointer",
+    transition: "all 0.15s ease",
   },
   threadBadge: {
-    fontSize: "12px",
+    fontSize: "11px",
     backgroundColor: "var(--bg-secondary)",
     border: "1px solid var(--border)",
-    padding: "6px 12px",
+    padding: "6px 10px",
     borderRadius: "8px",
     display: "flex",
     alignItems: "center",
-    gap: "8px",
+    gap: "6px",
     color: "var(--text-secondary)",
   },
   threadDot: {
-    width: "8px",
-    height: "8px",
+    width: "7px",
+    height: "7px",
     backgroundColor: "#10b981",
     borderRadius: "50%",
     boxShadow: "0 0 8px #10b981",
@@ -531,7 +597,7 @@ const styles = {
     backgroundColor: "transparent",
     border: "1px solid var(--border)",
     color: "var(--text-primary)",
-    padding: "6px 14px",
+    padding: "6px 12px",
     borderRadius: "8px",
     fontSize: "12px",
     cursor: "pointer",
@@ -661,7 +727,6 @@ const styles = {
     padding: "18px 22px",
     maxWidth: "520px",
     width: "100%",
-    animation: "fadeIn 0.2s ease-in-out",
   },
   approvalHeader: {
     display: "flex",
@@ -707,7 +772,6 @@ const styles = {
     fontWeight: "600",
     fontSize: "13px",
     cursor: "pointer",
-    transition: "background-color 0.15s ease",
   },
   rejectBtn: {
     flex: 1,
@@ -719,7 +783,6 @@ const styles = {
     fontWeight: "600",
     fontSize: "13px",
     cursor: "pointer",
-    transition: "background-color 0.15s ease",
   },
   statusBubble: {
     display: "inline-flex",
@@ -761,7 +824,6 @@ const styles = {
     borderRadius: "999px",
     cursor: "pointer",
     whiteSpace: "nowrap",
-    transition: "all 0.15s ease",
   },
   inputForm: {
     display: "flex",
@@ -789,6 +851,5 @@ const styles = {
     fontWeight: "600",
     fontSize: "14px",
     cursor: "pointer",
-    transition: "background-color 0.2s ease",
   },
 };

@@ -1,21 +1,24 @@
 import { getAgentApp } from "@/lib/agent";
+import { multiAgentApp } from "@/lib/multi-agent";
 import { HumanMessage } from "@langchain/core/messages";
 import { Command } from "@langchain/langgraph";
 
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { message, resumeAction, threadId } = body;
+    const { message, resumeAction, threadId, mode } = body;
 
     const currentThreadId = threadId || `session-${Date.now()}`;
     const config = {
       configurable: { thread_id: currentThreadId },
+      recursionLimit: 20,
     };
 
-    const agentApp = await getAgentApp();
+    // Select workflow engine: "multi" (Supervisor Multi-Agent) or default single ReAct agent
+    const activeApp = mode === "multi" ? multiAgentApp : await getAgentApp();
+
     const encoder = new TextEncoder();
 
-    // Create a ReadableStream for Server-Sent Events (SSE)
     const stream = new ReadableStream({
       async start(controller) {
         const sendEvent = (data) => {
@@ -23,12 +26,10 @@ export async function POST(request) {
         };
 
         try {
-          sendEvent({ type: "start", threadId: currentThreadId });
+          sendEvent({ type: "start", threadId: currentThreadId, mode: mode || "single" });
 
-          // Determine input: either resuming an interrupt or starting a new message
           let graphInput;
           if (resumeAction) {
-            // Human provided approval or rejection
             graphInput = new Command({ resume: resumeAction });
           } else if (message) {
             graphInput = { messages: [new HumanMessage(message)] };
@@ -38,8 +39,7 @@ export async function POST(request) {
             return;
           }
 
-          // Stream graph lifecycle events using streamEvents v2
-          const eventStream = agentApp.streamEvents(graphInput, {
+          const eventStream = activeApp.streamEvents(graphInput, {
             ...config,
             version: "v2",
           });
@@ -47,9 +47,10 @@ export async function POST(request) {
           for await (const event of eventStream) {
             const eventType = event.event;
 
-            // 1. Node start lifecycle
+            // 1. Node transitions
             if (eventType === "on_chain_start") {
-              if (event.name === "agent" || event.name === "tools") {
+              const nodeNames = ["agent", "tools", "supervisor", "ResearchAgent", "FinanceAgent", "synthesizer"];
+              if (nodeNames.includes(event.name)) {
                 sendEvent({
                   type: "node_start",
                   node: event.name,
@@ -64,6 +65,7 @@ export async function POST(request) {
                 sendEvent({
                   type: "token",
                   content: chunk.content,
+                  sourceNode: event.name,
                 });
               }
             }
@@ -87,15 +89,19 @@ export async function POST(request) {
             }
           }
 
-          // Check if graph stopped because of an interrupt
-          const snapshot = await agentApp.getState(config);
-          if (snapshot.tasks?.length > 0 && snapshot.tasks[0]?.interrupts?.length > 0) {
-            const interruptVal = snapshot.tasks[0].interrupts[0].value;
-            sendEvent({
-              type: "interrupt",
-              payload: interruptVal,
-              threadId: currentThreadId,
-            });
+          // Check if single-agent workflow paused due to interrupt()
+          if (mode !== "multi") {
+            const snapshot = await activeApp.getState(config);
+            if (snapshot.tasks?.length > 0 && snapshot.tasks[0]?.interrupts?.length > 0) {
+              const interruptVal = snapshot.tasks[0].interrupts[0].value;
+              sendEvent({
+                type: "interrupt",
+                payload: interruptVal,
+                threadId: currentThreadId,
+              });
+            } else {
+              sendEvent({ type: "done" });
+            }
           } else {
             sendEvent({ type: "done" });
           }
