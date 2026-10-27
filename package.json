@@ -15,7 +15,8 @@
     "test:stream": "node scripts/test-stream.mjs",
     "test:hitl": "node scripts/test-human-in-the-loop.mjs",
     "test:mcp": "node scripts/test-mcp.mjs",
-    "test:mcp:custom": "node scripts/test-custom-mcp.mjs"
+    "test:mcp:custom": "node scripts/test-custom-mcp.mjs",
+    "test:multi-agent": "node scripts/test-multi-agent.mjs"
   },
   "dependencies": {
     "@langchain/core": "^1.3.0",
